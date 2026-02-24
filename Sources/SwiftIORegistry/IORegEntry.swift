@@ -1,10 +1,9 @@
 import Foundation
 
-
 // Using a class because there is a recursive relationship with parent that struct's don't support
-public class IORegEntry: Identifiable, CustomStringConvertible {
-    public static let seperator = "/"
-    
+public class IORegistryEntry: Identifiable, CustomStringConvertible {
+    public static let separator = "/"
+
     public let id = UUID()
     public let name: String
     public let plane: String
@@ -12,66 +11,57 @@ public class IORegEntry: Identifiable, CustomStringConvertible {
     public let bundleName: String
     public let retainCount: UInt32
     public let registryID: UInt64
-    public let properties: [IORegProperty]
-    public var children: [IORegEntry]?
-    public let parent: IORegEntry?
-    
-    
+    public let properties: [IORegistryProperty]
+    public var children: [IORegistryEntry]?
+    public let parent: IORegistryEntry?
+
     public static var rootEntry: io_registry_entry_t? {
-        let entry = IORegistryGetRootEntry( kIOMainPortDefault )
+        let entry = IORegistryGetRootEntry(kIOMainPortDefault)
         guard entry != MACH_PORT_NULL else { return nil }
         return entry
     }
-    
+
     public static var planes: [String] {
         guard
-            let root = IORegEntry.rootEntry
+            let root = IORegistryEntry.rootEntry
         else { return [] }
-        
-        let properties = IORegEntry.getProperties(root)
-        
+
+        let properties = IORegistryEntry.getProperties(root)
+
         guard
             let registry = properties.first(where: { $0.name == "IORegistryPlanes" }),
             let children = registry.children
         else { return [] }
-        
+
         return children.map { $0.name }
     }
-    
-    
+
     public var description: String {
         return name
     }
-    
+
     public var superClasses: [String] {
-        return IORegEntry.getSuperClasses(forClass: className)
+        return IORegistryEntry.getSuperClasses(forClass: className)
     }
-    
-    public lazy var childEntryCount: Int = {
-        var count = 0
-        if let children = self.children {
-            count = children.count
-            children.forEach { count += $0.childEntryCount }
-        }
-        return count
-    }()
-    
-    public var sortedChildren:[IORegEntry]? {
+
+    public var childEntryCount: Int {
+        guard let children else { return 0 }
+        return children.reduce(children.count) { $0 + $1.childEntryCount }
+    }
+
+    public var sortedChildren: [IORegistryEntry]? {
         if let children = self.children {
             return children.sorted { $0.name < $1.name }
         }
         return nil
     }
-    
-    public var parents: [IORegEntry] {
-        guard let parent = parent else { return [] }
-        var parents: [IORegEntry] = []
-        var curParent:IORegEntry? = parent
-        while curParent != nil {
-            if let _parent = curParent {
-                parents.append(_parent)
-                curParent = _parent.parent
-            }
+
+    public var parents: [IORegistryEntry] {
+        var parents: [IORegistryEntry] = []
+        var curParent: IORegistryEntry? = parent
+        while let current = curParent {
+            parents.append(current)
+            curParent = current.parent
         }
         // First 2 items get skipped (Root & Other)
         if parents.count > 2 {
@@ -79,148 +69,147 @@ public class IORegEntry: Identifiable, CustomStringConvertible {
         }
         return []
     }
-    
+
     public var fullPath: String {
-        return plane + ":/" + parents.map { $0.name }.joined(separator: IORegEntry.seperator) + IORegEntry.seperator + name
+        let segments = parents.map { $0.name } + [name]
+        return plane + ":/" + segments.joined(separator: IORegistryEntry.separator)
     }
-    
-    
-    public static func getProperties(_ entry: io_registry_entry_t) -> [IORegProperty] {
+
+    public static func getProperties(_ entry: io_registry_entry_t) -> [IORegistryProperty] {
         var properties: Unmanaged<CFMutableDictionary>? = nil
-        var props:[IORegProperty] = []
+        var props: [IORegistryProperty] = []
         guard
-            IORegistryEntryCreateCFProperties(entry, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+            IORegistryEntryCreateCFProperties(entry, &properties, kCFAllocatorDefault, 0)
+                == KERN_SUCCESS,
             let _properties = properties?.takeRetainedValue()
         else { return [] }
-        
-        // TODO: what should be here, the release causes a crash
-        // defer { properties?.release() }
-        
+
         guard
-            let propsDict = _properties as? [ String : Any ]
+            let propsDict = _properties as? [String: Any]
         else { return [] }
-        
+
         props = propsDict.map { (name, value) in
-            IORegProperty(name:name , value: value)
+            IORegistryProperty(name: name, value: value)
         }
-        
-        return props
+
+        return props.sorted { $0.name < $1.name }
     }
-    
-    public static func getChildren(_ entry: io_registry_entry_t, plane: String, parent: IORegEntry? = nil) -> [IORegEntry]? {
+
+    static func getChildren(
+        _ entry: io_registry_entry_t, plane: String, parent: IORegistryEntry? = nil
+    ) -> [IORegistryEntry]? {
         var iterator: io_iterator_t = 0
-        var children:[IORegEntry] = []
+        var children: [IORegistryEntry] = []
         if IORegistryEntryGetChildIterator(entry, plane, &iterator) == KERN_SUCCESS {
             var next = IOIteratorNext(iterator)
-            while next != 0 {
-                if let child = IORegEntry(plane: plane, entry: next, parent: parent) {
+            while next != MACH_PORT_NULL {
+                if let child = IORegistryEntry(plane: plane, entry: next, parent: parent) {
                     children.append(child)
                 }
-                
+
                 IOObjectRelease(next)
                 next = IOIteratorNext(iterator)
             }
             IOObjectRelease(iterator)
         }
-        return children
+        return children.isEmpty ? nil : children
     }
-    
+
     public static func getEntryClassName(forEntry entry: io_registry_entry_t) -> String? {
-        let name = UnsafeMutablePointer<io_name_t>.allocate(capacity: 1)
-        defer { name.deallocate() }
-        guard IOObjectGetClass(entry, name) == KERN_SUCCESS else { return nil }
-        return String(cString: UnsafeRawPointer(name).assumingMemoryBound(to: CChar.self))
+        var nameBuffer = [CChar](repeating: 0, count: Int(MemoryLayout<io_name_t>.size))
+        guard IOObjectGetClass(entry, &nameBuffer) == KERN_SUCCESS else { return nil }
+        return String(
+            decoding: nameBuffer.prefix(while: { $0 != 0 }).map(UInt8.init), as: UTF8.self)
     }
-    
+
     public static func getEntryName(forEntry entry: io_registry_entry_t) -> String? {
-        let name = UnsafeMutablePointer<io_name_t>.allocate(capacity: 1)
-        defer { name.deallocate() }
-        guard IORegistryEntryGetName(entry, name) == KERN_SUCCESS else { return nil }
-        return String(cString: UnsafeRawPointer(name).assumingMemoryBound(to: CChar.self))
+        var nameBuffer = [CChar](repeating: 0, count: Int(MemoryLayout<io_name_t>.size))
+        guard IORegistryEntryGetName(entry, &nameBuffer) == KERN_SUCCESS else { return nil }
+        return String(
+            decoding: nameBuffer.prefix(while: { $0 != 0 }).map(UInt8.init), as: UTF8.self)
     }
-    
+
     public static func getBundleName(forClass className: String) -> String? {
-        let name = UnsafeMutablePointer<io_name_t>.allocate(capacity: 1)
-        defer { name.deallocate() }
+        // .takeRetainedValue() hands the memory management over to swift ARC
         guard
-            let bundle = IOObjectCopyBundleIdentifierForClass(className as CFString)?.takeRetainedValue() as String?
+            let bundle = IOObjectCopyBundleIdentifierForClass(className as CFString)
         else { return nil }
-        return bundle
+        return bundle.takeRetainedValue() as String
     }
-    
+
     public static func getSuperClasses(forClass className: String) -> [String] {
-        var names:[String] = [className]
-        var parent = className
-        
-        while let name = IOObjectCopySuperclassForClass(parent as CFString?)?.takeRetainedValue() as String? {
-            names.append(name)
-            parent = name
+        var names: [String] = [className]
+        var currentClass = className
+
+        while currentClass != "Unknown",
+            let name = IOObjectCopySuperclassForClass(currentClass as CFString?)
+        {
+            let superclassName = name.takeRetainedValue() as String
+            names.append(superclassName)
+            currentClass = superclassName
         }
         return names
     }
-    
-    public static func getEntryPath(forEntry entry: io_registry_entry_t) -> String? {
-        let path = UnsafeMutablePointer<io_name_t>.allocate(capacity: 1)
-        defer { path.deallocate() }
-        guard IORegistryEntryGetPath(entry, kIOServicePlane, path) == KERN_SUCCESS else { return nil }
-        return String(cString: UnsafeRawPointer(path).assumingMemoryBound(to: CChar.self))
+
+    public static func getEntryPath(
+        for entry: io_registry_entry_t, inPlane plane: String = "IOService"
+    ) -> String? {
+        var pathBuffer = [CChar](repeating: 0, count: MemoryLayout<io_string_t>.size)
+        guard IORegistryEntryGetPath(entry, plane, &pathBuffer) == KERN_SUCCESS else { return nil }
+        return String(
+            decoding: pathBuffer.prefix(while: { $0 != 0 }).map(UInt8.init), as: UTF8.self)
     }
-    
-    public static func getRegistryEntry(forPath path: String) -> io_registry_entry_t? {
+
+    public static func getRegistryEntry(forPath path: String) -> IORegistryEntry? {
         let item = IORegistryEntryFromPath(kIOMainPortDefault, path)
-        guard item != .zero else {
+        guard item != MACH_PORT_NULL else {
             return nil
         }
-        // defer { IOObjectRelease(item) }
-        return item
+        defer { IOObjectRelease(item) }
+
+        // Extract the plane from the path prefix (e.g., "IOService:/..." -> "IOService")
+        let plane = path.firstIndex(of: ":").map { String(path[..<$0]) } ?? "IOService"
+
+        let entry = IORegistryEntry(plane: plane, entry: item)
+
+        return entry
     }
-    
-    public static func getIORegEntryFromPath(_ path: String) -> IORegEntry? {
-        guard let ioEntry = IORegEntry.getRegistryEntry(forPath: path) else { return nil }
-        defer { IOObjectRelease(ioEntry) }
-        return IORegEntry(plane: "", entry: ioEntry )
-    }
-    
+
     public static func getRegistryEntryID(forEntry entry: io_registry_entry_t) -> UInt64 {
         var id: UInt64 = 0
-        let item = IORegistryEntryGetRegistryEntryID(entry, &id)
+        IORegistryEntryGetRegistryEntryID(entry, &id)
         return id
     }
-    
-    
-    public init?(plane: String, entry: io_registry_entry_t, parent: IORegEntry? = nil) {
+
+    public init?(plane: String, entry: io_registry_entry_t, parent: IORegistryEntry? = nil) {
         self.plane = plane
         self.parent = parent
         guard
-            let name = IORegEntry.getEntryName(forEntry: entry),
-            let className = IORegEntry.getEntryClassName(forEntry: entry),
-            let bundleName = IORegEntry.getBundleName(forClass: className)
+            let name = IORegistryEntry.getEntryName(forEntry: entry),
+            let className = IORegistryEntry.getEntryClassName(forEntry: entry),
+            let bundleName = IORegistryEntry.getBundleName(forClass: className)
         else { return nil }
         self.name = name
         self.className = className
         self.bundleName = bundleName
-        
+
         self.retainCount = IOObjectGetRetainCount(entry)
-        
+
         // Find all properties
-        self.properties = IORegEntry.getProperties(entry)
-        
-        self.registryID = IORegEntry.getRegistryEntryID(forEntry: entry)
-        
+        self.properties = IORegistryEntry.getProperties(entry)
+
+        self.registryID = IORegistryEntry.getRegistryEntryID(forEntry: entry)
+
         // Find all children nodes
-        self.children = IORegEntry.getChildren(entry, plane: plane, parent: self)
-        if self.children?.count == 0 {
-            self.children = nil
-        }
+        self.children = IORegistryEntry.getChildren(entry, plane: plane, parent: self)
     }
 }
 
-
-extension IORegEntry: Hashable {
-    public static func == (lhs: IORegEntry, rhs: IORegEntry) -> Bool {
+extension IORegistryEntry: Hashable {
+    public static func == (lhs: IORegistryEntry, rhs: IORegistryEntry) -> Bool {
         return lhs.id == rhs.id
     }
-    
+
     public func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
