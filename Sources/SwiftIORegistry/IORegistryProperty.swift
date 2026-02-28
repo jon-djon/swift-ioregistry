@@ -5,6 +5,7 @@ public enum PropertyValue {
     case int(Int)
     case uint(UInt64)
     case float(Double)
+    case data(Data)
     case array([IORegistryProperty])
     case dictionary([IORegistryProperty])
     case unknown(Any)
@@ -17,6 +18,9 @@ extension PropertyValue: CustomStringConvertible {
         case .int(let v): return "0x" + String(v, radix: 16, uppercase: true)
         case .uint(let v): return "0x" + String(v, radix: 16, uppercase: true)
         case .float(let v): return "\(v)"
+        case .data(let v):
+            return
+                "(\(v.count) bytes) \(v.map { String(format: "%02X", $0) }.joined(separator: " "))"
         case .array(let items): return "\(items.count) items"
         case .dictionary(let items): return "\(items.count) items"
         case .unknown: return rawTypeString
@@ -29,6 +33,7 @@ extension PropertyValue: CustomStringConvertible {
         case .int: return "Number"
         case .uint: return "Number"
         case .float: return "Number"
+        case .data: return "Data"
         case .array: return "Array"
         case .dictionary: return "Dictionary"
         case .unknown: return "Unknown"
@@ -41,6 +46,7 @@ extension PropertyValue: CustomStringConvertible {
         case .int(let v): return "\(type(of: v))"
         case .uint(let v): return "\(type(of: v))"
         case .float(let v): return "\(type(of: v))"
+        case .data(let v): return "\(type(of: v))"
         case .array: return "Array"
         case .dictionary: return "Dictionary"
         case .unknown(let v): return "\(type(of: v))"
@@ -65,6 +71,8 @@ public struct IORegistryProperty: Identifiable, CustomStringConvertible {
             self.value = .uint(v)
         } else if let v = value as? Double {
             self.value = .float(v)
+        } else if let v = value as? Data {
+            self.value = .data(v)
         } else if let array = value as? NSArray {
             self.value = .array(
                 array.enumerated().map { index, element in
